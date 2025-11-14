@@ -1,0 +1,11 @@
+Security Policy (Excerpt)
+
+1. Purpose
+We protect customer data and maintain confidentiality, integrity, and availability.
+
+2. Access Control
+Use least privilege. Multi-factor authentication is required for admin access.
+
+3. Data Handling
+Encrypt sensitive data at rest and in transit. No public sharing.
+

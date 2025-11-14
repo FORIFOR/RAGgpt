@@ -1,0 +1,12 @@
+{
+  "name": "raggpt-root",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev:autodev",
+    "dev:autodev": "node scripts/dev-autodev.mjs",
+    "dev:autoport": "npm run dev:autodev",
+    "ui:dev": "npm --prefix ui run dev",
+    "build": "npm --prefix ui run build",
+    "start": "npm --prefix ui run start"
+  }
+}

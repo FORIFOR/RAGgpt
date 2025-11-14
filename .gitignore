@@ -1,0 +1,21 @@
+# Node/Next
+node_modules/
+.venv/
+.next/
+out/
+dist/
+build/
+coverage/
+# ENV & logs
+.env*
+npm-debug.log*
+yarn-error.log*
+# Python
+__pycache__/
+*.pyc
+.venv/
+# Mac
+.DS_Store
+
+*storybook.log
+storybook-static
