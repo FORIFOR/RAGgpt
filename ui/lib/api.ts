@@ -21,6 +21,7 @@ export type ApiFetchOptions = {
   query?: Record<string, QueryValue>;
   raw?: boolean;
   signal?: AbortSignal;
+  scope?: Scope;
 };
 
 function toBooleanString(value?: boolean) {
@@ -60,7 +61,7 @@ function mergeScope(scope: Scope, target: Record<string, any>) {
 }
 
 export async function apiFetch(path: string, opts: ApiFetchOptions = {}) {
-  const scope = getScope();
+  const scope = opts.scope ?? getScope();
   const url = createUrl(path);
 
   url.searchParams.set("tenant", scope.tenant);
@@ -134,6 +135,33 @@ export async function apiFetch(path: string, opts: ApiFetchOptions = {}) {
     return response.json();
   }
   return response.text();
+}
+
+export async function uploadFileToNotebook(
+  notebookId: string,
+  file: File,
+  options?: { folderPath?: string },
+) {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.set("notebookId", notebookId);
+  if (options?.folderPath) {
+    form.set("folderPath", options.folderPath);
+  }
+  return apiFetch("/api/backend/files/upload", {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function linkLibraryItemsToNotebook(
+  notebookId: string,
+  items: Array<{ id?: string; path?: string; type?: string }>,
+) {
+  return apiFetch("/api/backend/library/link", {
+    method: "POST",
+    body: { notebookId, items },
+  });
 }
 
 export type { Scope };

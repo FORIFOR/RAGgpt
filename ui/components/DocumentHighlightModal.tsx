@@ -22,6 +22,7 @@ type DocumentHighlightModalProps = {
   docId?: string | null;
   page?: number | null;
   snippet?: string | null;
+  anchorPhrase?: string | null;
   title?: string | null;
   queries?: string[] | null;
   onClose: () => void;
@@ -33,6 +34,7 @@ export function DocumentHighlightModal({
   docId,
   page,
   snippet,
+  anchorPhrase,
   title,
   queries,
   onClose,
@@ -63,12 +65,17 @@ export function DocumentHighlightModal({
     return `/api/backend/docs/${encodeURIComponent(docId)}/pdf?${scopeQuery}`;
   }, [docId, scopeQuery]);
 
-  const snippetJaOnly = useMemo(() => extractJapaneseOnly(snippet ?? ""), [snippet]);
-  const phrase = useMemo(() => nfkcJa(snippetJaOnly), [snippetJaOnly]);
-  const cjkTerms = useMemo(() => (snippet ? buildCjkTerms(snippet) : []), [snippet]);
+  const highlightSeed = anchorPhrase ?? snippet ?? "";
+  const snippetJaOnly = useMemo(() => extractJapaneseOnly(highlightSeed), [highlightSeed]);
+  const phrase = useMemo(() => {
+    const normalized = nfkcJa(highlightSeed);
+    if (normalized) return normalized;
+    return nfkcJa(snippetJaOnly);
+  }, [highlightSeed, snippetJaOnly]);
+  const cjkTerms = useMemo(() => (highlightSeed ? buildCjkTerms(highlightSeed) : []), [highlightSeed]);
   const latinFallback = useMemo(
-    () => latinFallbackTerms(snippet, queries),
-    [snippet, queries],
+    () => latinFallbackTerms(highlightSeed, queries),
+    [highlightSeed, queries],
   );
   const rectTerms = useMemo(
     () => mergeTerms(cjkTerms, latinFallback),
@@ -77,6 +84,7 @@ export function DocumentHighlightModal({
   const rectTermsKey = useMemo(() => rectTerms.join("|"), [rectTerms]);
   const rectInputKey = useMemo(() => `${phrase}|${rectTermsKey}`, [phrase, rectTermsKey]);
   const hasRectInputs = phrase.length > 0 || rectTerms.length > 0;
+  const displaySnippet = snippet ?? anchorPhrase ?? null;
   const setRectDebugState = useCallback((state: any) => {
     rectDebugRef.current = state;
     if (typeof window !== "undefined") {
@@ -478,8 +486,8 @@ export function DocumentHighlightModal({
               </div>
             )}
           </div>
-          {snippet ? (
-            <p className="mt-3 text-center text-xs text-slate-500">{snippet}</p>
+          {displaySnippet ? (
+            <p className="mt-3 text-center text-xs text-slate-500">{displaySnippet}</p>
           ) : null}
           {viewerError ? (
             <p className="mt-4 text-center text-xs text-red-600">{viewerError}</p>

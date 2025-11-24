@@ -9,6 +9,9 @@ export type NotebookCitation = {
   title?: string;
   uri?: string;
   quote?: string;
+  anchor_phrase?: string | null;
+  anchor_char_start?: number | null;
+  anchor_char_end?: number | null;
 };
 
 export type SentenceSegment = {

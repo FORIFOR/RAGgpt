@@ -1,5 +1,10 @@
 export type NotebookMeta = {
   title: string;
+  description?: string;
+  nextcloudPath?: string;
+  nextcloudUrl?: string;
+  tags?: string[];
+  createdAt?: number;
   updatedAt: number;
 };
 
@@ -23,6 +28,15 @@ export function loadNotebookMeta(id: string): NotebookMeta {
     }
     return {
       title: parsed.title || id,
+      description: parsed.description,
+      nextcloudPath: parsed.nextcloudPath,
+      nextcloudUrl: parsed.nextcloudUrl,
+      tags: Array.isArray(parsed.tags)
+        ? parsed.tags
+            .map((tag) => (typeof tag === "string" ? tag.trim() : ""))
+            .filter((tag) => tag.length > 0)
+        : undefined,
+      createdAt: parsed.createdAt,
       updatedAt: parsed.updatedAt || Date.now(),
     };
   } catch {
@@ -34,6 +48,21 @@ export function saveNotebookMeta(id: string, meta: NotebookMeta) {
   if (typeof window === "undefined") return;
   const payload: NotebookMeta = {
     title: meta.title?.trim() || id,
+    description: meta.description?.trim()
+      ? meta.description.trim()
+      : undefined,
+    nextcloudPath: meta.nextcloudPath?.trim()
+      ? meta.nextcloudPath.trim()
+      : undefined,
+    nextcloudUrl: meta.nextcloudUrl?.trim()
+      ? meta.nextcloudUrl.trim()
+      : undefined,
+    tags: Array.isArray(meta.tags)
+      ? meta.tags
+          .map((tag) => tag?.trim?.())
+          .filter((tag): tag is string => !!tag && tag.length > 0)
+      : undefined,
+    createdAt: meta.createdAt || Date.now(),
     updatedAt: Date.now(),
   };
   window.localStorage.setItem(storageKey(id), JSON.stringify(payload));

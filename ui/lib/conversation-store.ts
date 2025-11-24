@@ -1,30 +1,37 @@
+"use client";
+
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
+import { persist, createJSONStorage, type PersistStorage } from "zustand/middleware";
+import { useEffect, useState } from "react";
 
 import type { SummaryJobSnapshot } from "./summary-job";
-
-export type StoredMessage = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  citations?: any[];
-  segments?: Array<{ text: string; citationIndices: number[] }>;
-  createdAt: number;
-};
-
-export type StoredSummaryJob = SummaryJobSnapshot;
+import type { NotebookMessage } from "@/types/notebook-conversation";
 
 type NotebookConversation = {
-  messages: StoredMessage[];
-  summaryJob?: StoredSummaryJob | null;
+  messages: NotebookMessage[];
+  summaryJob?: SummaryJobSnapshot | null;
+};
+
+export const EMPTY_NOTEBOOK_CONVERSATION: NotebookConversation = {
+  messages: [],
+  summaryJob: null,
 };
 
 type ConversationStore = {
   notebooks: Record<string, NotebookConversation>;
-  setMessages: (notebookId: string, messages: StoredMessage[]) => void;
-  setSummaryJob: (notebookId: string, job: StoredSummaryJob | null) => void;
+  setMessages: (notebookId: string, messages: NotebookMessage[]) => void;
+  updateMessages: (
+    notebookId: string,
+    updater: (messages: NotebookMessage[]) => NotebookMessage[],
+  ) => void;
+  setSummaryJob: (notebookId: string, job: SummaryJobSnapshot | null) => void;
   clearNotebook: (notebookId: string) => void;
 };
+
+const storage: PersistStorage<ConversationStore> | undefined =
+  typeof window === "undefined"
+    ? undefined
+    : createJSONStorage<ConversationStore>(() => localStorage);
 
 export const useConversationStore = create(
   persist<ConversationStore>(
@@ -40,6 +47,19 @@ export const useConversationStore = create(
             },
           },
         })),
+      updateMessages: (notebookId, updater) =>
+        set((state) => {
+          const current = state.notebooks[notebookId]?.messages ?? [];
+          return {
+            notebooks: {
+              ...state.notebooks,
+              [notebookId]: {
+                ...(state.notebooks[notebookId] ?? { messages: [] }),
+                messages: updater(current),
+              },
+            },
+          };
+        }),
       setSummaryJob: (notebookId, job) =>
         set((state) => ({
           notebooks: {
@@ -59,10 +79,33 @@ export const useConversationStore = create(
     }),
     {
       name: "conversation-store",
-      storage: createJSONStorage(() =>
-        typeof window === "undefined" ? undefined : localStorage,
-      ),
+      storage,
       version: 1,
+      skipHydration: true,
     },
   ),
 );
+
+export function useConversationStoreHydration(): boolean {
+  const [hydrated, setHydrated] = useState(
+    () => useConversationStore.persist.hasHydrated?.() ?? false,
+  );
+
+  useEffect(() => {
+    const unsubHydrate = useConversationStore.persist.onHydrate?.(() => {
+      setHydrated(false);
+    });
+    const unsubFinish = useConversationStore.persist.onFinishHydration?.(() => {
+      setHydrated(true);
+    });
+    if (!useConversationStore.persist.hasHydrated?.()) {
+      void useConversationStore.persist.rehydrate();
+    }
+    return () => {
+      unsubHydrate?.();
+      unsubFinish?.();
+    };
+  }, []);
+
+  return hydrated;
+}

@@ -40,6 +40,38 @@ open http://localhost:3000
 make health
 ```
 
+## Nextcloud WebDAV 設定
+
+Nextcloud の WebDAV にファイルを上げたり `/RAG` フォルダを Notebook に紐付けるためには、API と Next.js の両方で同じ環境変数を用意する必要があります。下記のキーを `.env.runtime`（`npm run dev:autoport` や docker compose 用）および `ui/.env.local`（Next.js）に設定し、本番でも Render / Cloudflare 等のダッシュボードで同じキーを登録してください。
+
+### 必須環境変数
+
+| 変数 | 説明 |
+| --- | --- |
+| `NEXTCLOUD_WEBDAV_BASE_URL` | `https://cloud.example.com/remote.php/dav/files/<user>/` 形式の WebDAV ベース URL（末尾 `/` 可）。 |
+| `NEXTCLOUD_USERNAME` **or** `NEXTCLOUD_WEBDAV_USERNAME` | WebDAV 用の Nextcloud ユーザー名。どちらのキーでも読み取れます。 |
+| `NEXTCLOUD_APP_PASSWORD` **or** `NEXTCLOUD_WEBDAV_PASSWORD` | 上記ユーザーのアプリパスワード（Nextcloud → 設定 → セキュリティ → デバイスとセッションで発行）。 |
+
+よく使うオプション:
+
+- `NEXTCLOUD_RAG_FOLDER` … Notebook ごとの既定ルート（例 `/RAG`）
+- `NEXTCLOUD_PUBLIC_BASE_URL` … UI から Nextcloud Files に遷移する際のベース URL
+- `NEXTCLOUD_TIMEOUT_MS` / `NEXTCLOUD_VERIFY_TLS` … WebDAV リクエストのタイムアウト / TLS 検証
+
+### ローカル開発 (.env.runtime / ui/.env.local)
+
+1. `cp .env.example .env.runtime` を実行して API/Integrations 用の設定ファイルを作成。
+2. `ui/.env.local` を作成し、同じ `NEXTCLOUD_*` キーを記入（UI 用には公開値が必要なものだけ `NEXT_PUBLIC_` で始める）。
+3. `npm run dev:autoport` または `docker compose -f infrastructure/docker-compose.nextcloud.yml up -d --build` を実行。
+4. `curl -fsSL http://localhost:3000/api/backend/nextcloud/status | jq` で Next.js 側の設定状況を確認。`ok: true` になれば完了です。
+
+### 本番環境での設定例
+
+- **Render**: 対象サービス（FastAPI / Next.js）の “Environment → Environment Variables” に上記キーを追加し、再デプロイします。Backend と UI の両方に同じ値を入れてください。
+- **Cloudflare Pages / Workers**: プロジェクト設定の “Environment variables” で `NEXTCLOUD_*` を追加します。Workers の場合は `env.NEXTCLOUD_WEBDAV_BASE_URL` などが参照されるため、Next.js 側で `process.env` を通じてアクセスできるよう `NEXT_PUBLIC_NEXTCLOUD_*` が必要な値だけ追加してください。
+
+環境変数が未設定の場合、`/api/backend/nextcloud/status` は `ok: false` を返し、UI のアップロードや Nextcloud 連携ボタンは自動で無効化され「Nextcloud が未設定です」とユーザーに案内します。設定後にサーバーを再起動すれば、追加のコード変更なしで連携が有効になります。
+
 ## Auto-port Development System
 
 `npm run dev:autoport` は以下を自動で行います:
@@ -80,3 +112,7 @@ npm run clean:autoport       # データ含めて完全リセット
 - `/data/qdrant`: persistence volume
 
 See `/docs/ARCHITECTURE.md` and `/docs/API.md` for details.
+
+## Nextcloud連携
+
+Nextcloud Hub (AIO) + Ollama + Elasticsearch をすでに運用している環境と統合するための手順は [`docs/NEXTCLOUD_INTEGRATION.md`](./docs/NEXTCLOUD_INTEGRATION.md) を参照してください。Dockerネットワークを `nextcloud-aio` で共有し、`rag-integrator` の `/nextcloud/webhook` へ Flow から通知することで `/RAG` フォルダの更新が即座に RAG インデックスへ反映されます。

@@ -14,8 +14,13 @@ import { toast } from "sonner";
 
 
 import { SummaryProgressPanel } from "@/components/SummaryProgressPanel";
-import { UploadPanel } from "@/components/UploadPanel";
-import { apiFetch } from "@/lib/api";
+import { UploadPanel, type LibraryUploadRecord } from "@/components/UploadPanel";
+import { NotebookInfoCard } from "@/components/notebook/NotebookInfoCard";
+import { NotebookSettingsDialog } from "@/components/notebook/NotebookSettingsDialog";
+import { LibraryPickerModal } from "@/components/notebook/LibraryPickerModal";
+import { LibraryAttachPanel } from "@/components/notebook/LibraryAttachPanel";
+import { NotebookSourcesList } from "@/components/notebook/NotebookSourcesList";
+import { apiFetch, linkLibraryItemsToNotebook } from "@/lib/api";
 import {
   DEFAULT_TENANT,
   DEFAULT_USER,
@@ -29,14 +34,17 @@ import {
   type NotebookMeta,
 } from "@/lib/notebookMeta";
 import {
+  EMPTY_NOTEBOOK_CONVERSATION,
   useConversationStore,
-  type StoredMessage,
+  useConversationStoreHydration,
 } from "@/lib/conversation-store";
-import {
-  buildSentenceAttribution,
-  type SentenceSegment,
-} from "@/lib/sentence-attribution";
 import type { SummaryJobSnapshot } from "@/lib/summary-job";
+import type { LibraryFile } from "@/lib/library";
+import { notebookRunner } from "@/lib/notebook-runner";
+import type {
+  NotebookMessage as Message,
+  NotebookCitation as Citation,
+} from "@/types/notebook-conversation";
 
 const DocumentHighlightModal = nextDynamic(
   () =>
@@ -54,26 +62,6 @@ type DocumentRecord = {
   file_name?: string;
 };
 
-type Message = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  citations?: Citation[];
-  segments?: SentenceSegment[];
-  createdAt: number;
-};
-
-type Citation = {
-  id?: string | number;
-  doc_id?: string;
-  title?: string;
-  page?: number;
-  uri?: string;
-  snippet?: string;
-  text?: string;
-  quote?: string;
-};
-
 const swrFetcher = (url: string) => apiFetch(url);
 const NON_CANCELABLE_SUMMARY_STATUSES = new Set([
   "done",
@@ -81,17 +69,21 @@ const NON_CANCELABLE_SUMMARY_STATUSES = new Set([
   "canceled",
 ]);
 
-const DEFAULT_LEFT_PANE_WIDTH = 300;
+const DEFAULT_LEFT_PANE_WIDTH = 340;
 const DEFAULT_RIGHT_PANE_WIDTH = 320;
 const MIN_LEFT_PANE_WIDTH = 220;
 const MIN_RIGHT_PANE_WIDTH = 240;
 const MIN_CENTER_PANE_WIDTH = 420;
+const DEFAULT_NEXTCLOUD_FOLDER =
+  process.env.NEXT_PUBLIC_NEXTCLOUD_RAG_FOLDER?.trim() || "/RAG";
 
 type PanePosition = "left" | "right";
 type PaneWidths = {
   left: number;
   right: number;
 };
+
+type LibraryIntent = "attach-folder" | "attach-files" | "settings-folder";
 
 function areSetsEqual(a: Set<string>, b: Set<string>) {
   if (a.size !== b.size) return false;
@@ -103,6 +95,8 @@ function areSetsEqual(a: Set<string>, b: Set<string>) {
 
 export default function NotebookPage({ params }: { params: { id: string } }) {
   const notebookId = decodeURIComponent(params.id);
+  const fallbackNextcloudPath = useMemo(() => buildNotebookFolderPath(notebookId), [notebookId]);
+  const conversationsHydrated = useConversationStoreHydration();
 
   const [sessionContext, setSessionContext] = useState<{
     tenant: string;
@@ -110,17 +104,23 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     includeGlobal: boolean;
   } | null>(null);
   const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [summaryJob, setSummaryJob] = useState<SummaryJobSnapshot | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [linkingCount, setLinkingCount] = useState(0);
   const [useSelectedOnly, setUseSelectedOnly] = useState(true);
   const [loadingConversations, setLoadingConversations] = useState(false);
+  const [sourceTab, setSourceTab] = useState<"library" | "upload">("library");
+  const [libraryIntent, setLibraryIntent] = useState<LibraryIntent | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsFolderCandidate, setSettingsFolderCandidate] = useState<string | undefined>(undefined);
   const [preview, setPreview] = useState<{
     docId: string;
     page?: number | null;
     snippet?: string | null;
+    anchorPhrase?: string | null;
+    anchorCharStart?: number | null;
+    anchorCharEnd?: number | null;
     title?: string | null;
     queries?: string[];
   } | null>(null);
@@ -136,7 +136,6 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     right: DEFAULT_RIGHT_PANE_WIDTH,
   });
   const [activeResizer, setActiveResizer] = useState<PanePosition | null>(null);
-  const summaryPollingRef = useRef<{ stop: () => void } | null>(null);
   const remoteConversationLoadedRef = useRef(false);
   const lastSavedConversationRef = useRef<string>("[]");
   const conversationSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -149,9 +148,15 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     containerWidth: number;
   } | null>(null);
   const setStoredMessages = useConversationStore((state) => state.setMessages);
-  const setStoredSummaryJob = useConversationStore(
-    (state) => state.setSummaryJob,
+  const updateStoredMessages = useConversationStore((state) => state.updateMessages);
+  const conversation = useConversationStore(
+    useCallback(
+      (state) => state.notebooks[notebookId] ?? EMPTY_NOTEBOOK_CONVERSATION,
+      [notebookId],
+    ),
   );
+  const messages: Message[] = conversation.messages ?? [];
+  const summaryJob: SummaryJobSnapshot | null = conversation.summaryJob ?? null;
 
   const scope = useMemo<Scope | null>(() => {
     if (!sessionContext) return null;
@@ -201,12 +206,123 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     setTitleDraft(meta.title);
   }, [meta.title]);
 
+  const openLibraryFolderPicker = useCallback(() => {
+    setLibraryIntent("attach-folder");
+  }, []);
+
+  const openLibraryFilePicker = useCallback(() => {
+    setLibraryIntent("attach-files");
+  }, []);
+
+  const openSettingsFolderPicker = useCallback(() => {
+    setLibraryIntent("settings-folder");
+  }, []);
+
   const { data: docPayload, mutate: refreshDocuments } = useSWR(
     scope
       ? `/api/backend/documents?tenant=${scope.tenant}&user_id=${scope.user_id}&notebook_id=${scope.notebook_id}&include_global=${scope.include_global ? "true" : "false"}`
       : null,
     swrFetcher,
     { revalidateOnFocus: false },
+  );
+
+  const libraryModalOpen = libraryIntent !== null;
+  const libraryMode = libraryIntent === "attach-files" ? "files" : "folder";
+
+  const runLinkingTask = useCallback(
+    async (
+      action: () => Promise<void>,
+      messages?: { pending?: string; success?: string; error?: string },
+    ) => {
+      setLinkingCount((prev) => prev + 1);
+      const toastId = toast.loading(messages?.pending ?? "資料をNotebookに追加しています…");
+      try {
+        await action();
+        toast.success(messages?.success ?? "資料をNotebookに追加しました", { id: toastId });
+        return true;
+      } catch (error) {
+        console.error(error);
+        const detail = error instanceof Error ? error.message : String(error);
+        toast.error(messages?.error ?? "資料の追加に失敗しました", {
+          id: toastId,
+          description: detail,
+        });
+        return false;
+      } finally {
+        setLinkingCount((prev) => Math.max(0, prev - 1));
+      }
+    },
+    [],
+  );
+
+  const handleLibraryConfirm = useCallback(
+    async (selection: { folder?: string; files?: LibraryFile[] }) => {
+      if (!libraryIntent) return;
+      const intent = libraryIntent;
+      setLibraryIntent(null);
+      if (intent === "settings-folder" && selection.folder) {
+        setSettingsFolderCandidate(selection.folder);
+        toast.success("フォルダを設定に反映しました");
+        return;
+      }
+      if (intent === "attach-folder" && selection.folder) {
+        await runLinkingTask(
+          async () => {
+            await linkLibraryItemsToNotebook(notebookId, [{ path: selection.folder, type: "folder" }]);
+            await refreshDocuments();
+          },
+          {
+            pending: "フォルダをNotebookに追加しています…",
+            success: "フォルダを紐付けました",
+          },
+        );
+        return;
+      }
+      if (intent === "attach-files" && selection.files?.length) {
+        const filesWithIds = selection.files.filter((file) => file?.id);
+        if (filesWithIds.length === 0) {
+          toast.error("選択したファイルを取得できませんでした");
+          return;
+        }
+        const count = filesWithIds.length;
+        await runLinkingTask(
+          async () => {
+            await linkLibraryItemsToNotebook(
+              notebookId,
+              filesWithIds.map((file) => ({ id: file.id })),
+            );
+            await refreshDocuments();
+          },
+          {
+            pending: `${count} 件のファイルをNotebookに追加しています…`,
+            success: `${count} 件のファイルを紐付けました`,
+          },
+        );
+        return;
+      }
+      toast.error("ライブラリの紐付けを実行できませんでした");
+    },
+    [libraryIntent, notebookId, refreshDocuments, runLinkingTask, toast],
+  );
+
+  const handleSettingsSave = useCallback(
+    (updates: { title?: string; description?: string; nextcloudPath?: string; nextcloudUrl?: string }) => {
+      setMeta((prev) => {
+        const next: NotebookMeta = {
+          ...prev,
+          title: updates.title?.trim() || prev.title,
+          description: updates.description ?? prev.description,
+          nextcloudPath: updates.nextcloudPath?.trim() || prev.nextcloudPath,
+          nextcloudUrl: updates.nextcloudUrl?.trim() || prev.nextcloudUrl,
+          updatedAt: Date.now(),
+        };
+        saveNotebookMeta(notebookId, next);
+        return next;
+      });
+      setSettingsOpen(false);
+      setSettingsFolderCandidate(undefined);
+    },
+    [notebookId],
   );
 
   const rawDocuments = docPayload?.documents;
@@ -232,21 +348,7 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
   }, [rawDocuments]);
 
   useEffect(() => {
-    const stored = useConversationStore.getState().notebooks[notebookId];
-    setMessages(stored ? deserializeMessages(stored.messages) : []);
-    setSummaryJob(stored?.summaryJob ?? null);
-  }, [notebookId]);
-
-  useEffect(() => {
-    setStoredMessages(notebookId, serializeMessages(messages));
-  }, [messages, notebookId, setStoredMessages]);
-
-  useEffect(() => {
-    setStoredSummaryJob(notebookId, summaryJob);
-  }, [summaryJob, notebookId, setStoredSummaryJob]);
-
-  useEffect(() => {
-    if (!scope) return;
+    if (!scope || !conversationsHydrated) return;
     let aborted = false;
     setLoadingConversations(true);
     remoteConversationLoadedRef.current = false;
@@ -256,9 +358,7 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
         const remoteMessages = Array.isArray(payload?.messages)
           ? deserializeMessages(payload.messages)
           : [];
-        if (remoteMessages.length > 0) {
-          setMessages(remoteMessages);
-        }
+        setStoredMessages(notebookId, remoteMessages);
         lastSavedConversationRef.current = JSON.stringify(
           payload?.messages ?? [],
         );
@@ -277,7 +377,7 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     return () => {
       aborted = true;
     };
-  }, [scope, apiFetch, toast, setMessages]);
+  }, [scope, apiFetch, toast, notebookId, setStoredMessages, conversationsHydrated]);
 
   useEffect(() => {
     if (!scope) return undefined;
@@ -320,143 +420,12 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
 
   const updateMessageById = useCallback(
     (id: string, updater: (msg: Message) => Message) => {
-      setMessages((prev) =>
+      updateStoredMessages(notebookId, (prev) =>
         prev.map((msg) => (msg.id === id ? updater(msg) : msg)),
       );
     },
-    [],
+    [notebookId, updateStoredMessages],
   );
-
-  const stopSummaryPolling = useCallback(() => {
-    if (summaryPollingRef.current) {
-      summaryPollingRef.current.stop();
-      summaryPollingRef.current = null;
-    }
-  }, []);
-
-  const pollSummaryJob = useCallback(
-    (jobId: string, targetMessageId: string) => {
-      stopSummaryPolling();
-      let active = true;
-      summaryPollingRef.current = {
-        stop: () => {
-          active = false;
-        },
-      };
-
-      const loop = async () => {
-        try {
-          while (active) {
-            const status = await apiFetch(
-              `/api/backend/summarize/status/${encodeURIComponent(jobId)}`,
-              { method: "GET" },
-            );
-            if (!active) return;
-
-            const snapshot = normalizeSummarySnapshot(
-              status,
-              jobId,
-              targetMessageId,
-            );
-            setSummaryJob(snapshot);
-            const hasPartial = Boolean(
-              snapshot.partialText && snapshot.partialText.trim().length > 0,
-            );
-            const progressText = hasPartial
-              ? snapshot.partialText
-              : buildSummaryProgressText(snapshot);
-            updateMessageById(targetMessageId, (msg) => ({
-              ...msg,
-              content: progressText,
-            }));
-
-            if (status.status === "done" && status.result) {
-              updateMessageById(targetMessageId, (msg) => ({
-                ...msg,
-                content:
-                  (typeof status.result.summary === "string" &&
-                    status.result.summary.trim()) ||
-                  (typeof status.result.text === "string" &&
-                    status.result.text.trim()) ||
-                  "要約を生成できませんでした。",
-                citations: Array.isArray(status.result.citations)
-                  ? status.result.citations
-                  : msg.citations,
-              }));
-              setSummaryJob(null);
-              stopSummaryPolling();
-              break;
-            }
-
-            if (status.status === "canceled") {
-              updateMessageById(targetMessageId, (msg) => ({
-                ...msg,
-                content: "要約はキャンセルされました。",
-              }));
-              setSummaryJob(null);
-              stopSummaryPolling();
-              break;
-            }
-
-            if (status.status === "error") {
-              const err =
-                snapshot.error || sanitizeSummaryError(status.error);
-              throw new Error(err);
-            }
-
-            await new Promise((resolve) => setTimeout(resolve, 1500));
-          }
-        } catch (error) {
-          if (!active) return;
-          console.error(error);
-          const message =
-            error instanceof Error && error.message
-              ? error.message
-              : "要約の進捗取得に失敗しました。";
-          toast.error("要約の進捗取得に失敗しました。");
-          updateMessageById(targetMessageId, (msg) => ({
-            ...msg,
-            content: `要約に失敗しました: ${message}`,
-          }));
-          setSummaryJob((prev) => {
-            if (!prev) return null;
-            return {
-              ...prev,
-              status: "error",
-              phase: prev.phase ?? "error",
-              error: prev.error ?? message,
-              updatedAt: Date.now(),
-            };
-          });
-          stopSummaryPolling();
-        }
-      };
-
-      void loop();
-    },
-    [apiFetch, stopSummaryPolling, updateMessageById, toast],
-  );
-
-  useEffect(
-    () => () => {
-      stopSummaryPolling();
-    },
-    [stopSummaryPolling],
-  );
-
-  const activeJobIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!summaryJob?.id) {
-      activeJobIdRef.current = null;
-      stopSummaryPolling();
-      return;
-    }
-    if (activeJobIdRef.current === summaryJob.id) {
-      return;
-    }
-    activeJobIdRef.current = summaryJob.id;
-    pollSummaryJob(summaryJob.id, summaryJob.messageId);
-  }, [summaryJob, pollSummaryJob, stopSummaryPolling]);
 
   const toggleDocument = useCallback((docId: string) => {
     setSelectedDocs((prev) => {
@@ -516,6 +485,23 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     [notebookId],
   );
 
+  const handleLibraryUpload = useCallback(
+    (file: LibraryUploadRecord) => {
+      if (!file?.id) return;
+      void runLinkingTask(
+        async () => {
+          await linkLibraryItemsToNotebook(notebookId, [{ id: file.id }]);
+          await refreshDocuments();
+        },
+        {
+          pending: `${file.original_name || "ファイル"} をNotebookに追加しています…`,
+          success: `${file.original_name || "ファイル"} をNotebookに追加しました`,
+        },
+      );
+    },
+    [notebookId, refreshDocuments, runLinkingTask],
+  );
+
   const canSend = useMemo(() => {
     if (!scope) return false;
     const trimmed = input.trim();
@@ -556,68 +542,32 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
       createdAt: Date.now(),
     };
 
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    updateStoredMessages(notebookId, (prev) => [
+      ...prev,
+      userMessage,
+      assistantMessage,
+    ]);
     setInput("");
-
-    const payload: Record<string, any> = {
-      tenant: scope.tenant,
-      user_id: scope.user_id,
-      notebook_id: scope.notebook_id,
-      include_global: scope.include_global ?? false,
-      query: question,
-      stream: true,
-    };
-
-    if (selectedIds.length > 0) {
-      payload.selected_ids = selectedIds;
-    }
 
     const shouldSummarize =
       detectSummarizeIntent(question) && selectedIds.length > 0;
 
-    const updateAssistant = (updater: (msg: Message) => Message) => {
-      updateMessageById(assistantMessage.id, updater);
-    };
-
     if (shouldSummarize) {
-      stopSummaryPolling();
+      updateMessageById(assistantMessage.id, (msg) => ({
+        ...msg,
+        content: "要約処理を開始しました…",
+      }));
       try {
-        updateAssistant((msg) => ({
-          ...msg,
-          content: "要約処理を開始しました…",
-        }));
-        const startResponse = await apiFetch("/api/backend/summarize/start", {
-          method: "POST",
-          body: {
-            doc_ids: selectedIds,
-            query: question,
-          },
+        await notebookRunner.startSummary({
+          notebookId,
+          scope,
+          docIds: selectedIds,
+          question,
+          assistantMessageId: assistantMessage.id,
+          userMessageId: userMessage.id,
         });
-        const jobId = startResponse.job_id;
-        if (!jobId || typeof jobId !== "string") {
-          throw new Error("job_id not issued");
-        }
-        const timestamp = Date.now();
-        setSummaryJob({
-          id: jobId,
-          messageId: assistantMessage.id,
-          progress: 0,
-          status: "queued",
-          phase: "queue",
-          startedAt: timestamp,
-          updatedAt: timestamp,
-        });
-        pollSummaryJob(jobId, assistantMessage.id);
-      } catch (error) {
-        console.error(error);
-        toast.error("要約の生成に失敗しました。");
-        setMessages((prev) =>
-          prev.filter(
-            (msg) =>
-              msg.id !== userMessage.id && msg.id !== assistantMessage.id,
-          ),
-        );
-        setSummaryJob(null);
+      } catch {
+        // errors handled inside runner
       } finally {
         setSending(false);
       }
@@ -625,90 +575,16 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     }
 
     try {
-      const response = await apiFetch("/api/backend/generate", {
-        method: "POST",
-        body: payload,
-        raw: true,
+      await notebookRunner.generateAnswer({
+        notebookId,
+        scope,
+        question,
+        selectedIds,
+        assistantMessageId: assistantMessage.id,
+        userMessageId: userMessage.id,
       });
-
-      if (!response.body) {
-        throw new Error("ストリームを受信できませんでした");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-      let assistantContentBuffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const segments = buffer.split("\n\n");
-        buffer = segments.pop() ?? "";
-
-        for (const segment of segments) {
-          const dataLine = segment
-            .split("\n")
-            .find((line) => line.startsWith("data:"));
-          if (!dataLine) continue;
-          const payloadString = dataLine.slice(5).trim();
-          if (!payloadString || payloadString === "[DONE]") continue;
-
-          let event: any;
-          try {
-            event = JSON.parse(payloadString);
-          } catch {
-            continue;
-          }
-
-          const appendedText =
-            typeof event.delta === "string"
-              ? event.delta
-              : typeof event.text === "string"
-                ? event.text
-                : typeof event.token === "string"
-                  ? event.token
-                  : "";
-
-          if (appendedText) {
-            assistantContentBuffer += appendedText;
-            updateAssistant((msg) => ({
-              ...msg,
-              content: assistantContentBuffer,
-            }));
-          }
-
-          if (event.type === "final" && Array.isArray(event.citations)) {
-            const attribution = buildSentenceAttribution(
-              assistantContentBuffer.trim(),
-              event.citations,
-            );
-            updateAssistant((msg) => ({
-              ...msg,
-              citations: attribution.citations,
-              segments: attribution.segments,
-            }));
-            continue;
-          }
-
-          if (Array.isArray(event.citations)) {
-            updateAssistant((msg) => ({
-              ...msg,
-              citations: event.citations,
-            }));
-          }
-        }
-      }
-    } catch (error) {
-      console.error(error);
-      toast.error("生成に失敗しました。もう一度お試しください。");
-      setMessages((prev) =>
-        prev.filter(
-          (msg) =>
-            msg.id !== userMessage.id && msg.id !== assistantMessage.id,
-        ),
-      );
+    } catch {
+      // runner already reported the error
     } finally {
       setSending(false);
     }
@@ -718,11 +594,10 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     sending,
     useSelectedOnly,
     selectedDocs,
-    apiFetch,
     toast,
+    updateStoredMessages,
+    notebookId,
     updateMessageById,
-    pollSummaryJob,
-    stopSummaryPolling,
   ]);
 
   const handleComposerKeyDown = useCallback(
@@ -743,41 +618,29 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     [handleSend],
   );
 
-  const handleCancelSummary = useCallback(async () => {
-    if (!summaryJob) return;
-    try {
-      await apiFetch("/api/backend/summarize/cancel", {
-        method: "POST",
-        body: { job_id: summaryJob.id },
-      });
-      toast.info("要約をキャンセルしました。");
-    } catch (error) {
-      console.error(error);
-      toast.error("キャンセルに失敗しました。");
-      return;
-    }
-    stopSummaryPolling();
-    setSummaryJob(null);
-    updateMessageById(summaryJob.messageId, (msg) => ({
-      ...msg,
-      content: "要約はキャンセルされました。",
-    }));
-  }, [
-    summaryJob,
-    apiFetch,
-    stopSummaryPolling,
-    updateMessageById,
-    toast,
-  ]);
+  const handleCancelSummary = useCallback(() => {
+    void notebookRunner.cancelSummary(notebookId);
+  }, [notebookId]);
 
   const handlePreviewCitation = useCallback(
     (citation: Citation) => {
       if (!citation.doc_id || !scope) return;
       const queries = buildHighlightQueries(citation);
+      const anchorStart =
+        typeof citation.anchor_char_start === "number" && Number.isFinite(citation.anchor_char_start)
+          ? citation.anchor_char_start
+          : null;
+      const anchorEnd =
+        typeof citation.anchor_char_end === "number" && Number.isFinite(citation.anchor_char_end)
+          ? citation.anchor_char_end
+          : null;
       setPreview({
         docId: citation.doc_id,
         page: citation.page ?? null,
         snippet: citation.snippet || citation.text || citation.title || null,
+        anchorPhrase: citation.anchor_phrase || citation.text || citation.snippet || null,
+        anchorCharStart: anchorStart,
+        anchorCharEnd: anchorEnd,
         title: citation.title || citation.doc_id,
         queries,
       });
@@ -893,26 +756,80 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
     <div className="vhfix flex h-[calc(100dvh-var(--app-header-height))] min-h-[calc(100dvh-var(--app-header-height))] flex-col bg-slate-50">
       <div ref={layoutRef} className="flex flex-1 overflow-hidden">
         <aside
-          className="flex shrink-0 flex-col gap-4 border-r border-slate-200 bg-white p-4"
+          className="flex shrink-0 flex-col gap-4 border-r border-slate-200 bg-slate-50 p-4"
           style={{ width: `${paneWidths.left}px` }}
         >
-          {scope ? (
-            <UploadPanel
-              scope={scope}
-              onBusyChange={setIsUploading}
-              onCompleted={() => void refreshDocuments()}
-              onDocumentReady={handleDocumentReady}
-            />
-          ) : (
-            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3 text-xs text-slate-400">
-              スコープを初期化しています…
-            </div>
-          )}
-          <DocumentList
-            documents={documents}
-            selected={selectedDocs}
-            onToggle={toggleDocument}
+          <NotebookInfoCard
+            meta={meta}
+            fallbackPath={fallbackNextcloudPath}
+            onEdit={() => {
+              setSettingsOpen(true);
+              setSettingsFolderCandidate(undefined);
+            }}
           />
+          <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex border-b border-slate-100">
+              <button
+                type="button"
+                onClick={() => setSourceTab("library")}
+                className={`flex-1 px-3 py-2 text-sm ${
+                  sourceTab === "library" ? "border-b-2 border-slate-900 font-semibold" : "text-slate-500"
+                }`}
+              >
+                ライブラリから追加
+              </button>
+              <button
+                type="button"
+                onClick={() => setSourceTab("upload")}
+                className={`flex-1 px-3 py-2 text-sm ${
+                  sourceTab === "upload" ? "border-b-2 border-slate-900 font-semibold" : "text-slate-500"
+                }`}
+              >
+                ローカルからアップロード
+              </button>
+            </div>
+            <div className="p-4">
+              {sourceTab === "library" ? (
+                <LibraryAttachPanel
+                  onPickFolder={openLibraryFolderPicker}
+                  onPickFiles={openLibraryFilePicker}
+                />
+              ) : scope ? (
+                <UploadPanel
+                  scope={scope}
+                  notebookId={notebookId}
+                  nextcloudPath={meta.nextcloudPath || fallbackNextcloudPath}
+                  onBusyChange={setIsUploading}
+                  onCompleted={() => void refreshDocuments()}
+                  onDocumentReady={handleDocumentReady}
+                  onFileUploaded={handleLibraryUpload}
+                />
+              ) : (
+                <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3 text-xs text-slate-400">
+                  スコープを初期化しています…
+                </div>
+              )}
+              {linkingCount > 0 ? (
+                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                  資料をNotebookに取り込み中です。処理には数十秒かかることがあります。
+                </div>
+              ) : null}
+            </div>
+          </section>
+          <section className="flex flex-1 flex-col">
+            <div className="flex items-center justify-between text-sm text-slate-700">
+              <span>Notebook資料</span>
+              <span className="text-xs text-slate-500">{documents.length} 件</span>
+            </div>
+            <div className="mt-2 flex-1 overflow-auto pr-1">
+              <NotebookSourcesList
+                documents={documents}
+                selected={selectedDocs}
+                onToggle={toggleDocument}
+                onRefresh={() => void refreshDocuments()}
+              />
+            </div>
+          </section>
           <StorageUsageCard scope={scope} />
         </aside>
 
@@ -1136,76 +1053,34 @@ export default function NotebookPage({ params }: { params: { id: string } }) {
           </div>
         </aside>
       </div>
+      <NotebookSettingsDialog
+        open={settingsOpen}
+        meta={meta}
+        fallbackPath={fallbackNextcloudPath}
+        selectedFolder={settingsFolderCandidate}
+        onSave={handleSettingsSave}
+        onClose={() => setSettingsOpen(false)}
+        onPickFolder={openSettingsFolderPicker}
+      />
+      <LibraryPickerModal
+        open={libraryModalOpen}
+        mode={libraryMode}
+        initialPath={meta.nextcloudPath || fallbackNextcloudPath}
+        scope={scope}
+        onClose={() => setLibraryIntent(null)}
+        onConfirm={handleLibraryConfirm}
+      />
       <DocumentHighlightModal
         open={Boolean(preview && scope)}
         scope={scope}
         docId={preview?.docId}
         page={preview?.page ?? undefined}
         snippet={preview?.snippet ?? undefined}
+        anchorPhrase={preview?.anchorPhrase ?? undefined}
         title={preview?.title ?? undefined}
         queries={preview?.queries}
         onClose={() => setPreview(null)}
       />
-    </div>
-  );
-}
-
-function DocumentList({
-  documents,
-  selected,
-  onToggle,
-}: {
-  documents: DocumentRecord[];
-  selected: Set<string>;
-  onToggle: (docId: string) => void;
-}) {
-  if (documents.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
-        まだ資料がありません。上の「資料を追加」からアップロードしてください。
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex-1 overflow-auto">
-      <ul className="space-y-2">
-        {documents.map((doc) => {
-          const isSelected = selected.has(doc.doc_id);
-          const secondary =
-            doc.source_file_path?.split("/").pop() ||
-            doc.file_name ||
-            doc.doc_id;
-          return (
-            <li
-              key={doc.doc_id}
-              className={clsx(
-                "list-focus rounded-xl border px-3 py-3 text-sm shadow-sm transition",
-                isSelected
-                  ? "border-sky-500 bg-sky-50"
-                  : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50",
-              )}
-              data-selected={isSelected ? "true" : undefined}
-            >
-              <label className="flex cursor-pointer items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={isSelected}
-                  onChange={() => onToggle(doc.doc_id)}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium text-slate-800">
-                    {doc.title || doc.doc_id}
-                  </div>
-                  <div className="mt-1 truncate text-xs text-slate-500">
-                    {secondary}
-                  </div>
-                </div>
-              </label>
-            </li>
-          );
-        })}
-      </ul>
     </div>
   );
 }
@@ -1384,7 +1259,7 @@ function splitSentences(value: string): string[] {
 }
 
 function buildHighlightQueries(citation: Citation): string[] {
-  const seeds = [citation.snippet, citation.text, citation.quote];
+  const seeds = [citation.anchor_phrase, citation.snippet, citation.text, citation.quote];
   const queries: string[] = [];
   seeds.forEach((seed) => {
     const normalized = normalizeQueryFragment(seed);
@@ -1413,7 +1288,7 @@ function formatBytes(bytes: number): string {
   return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
 }
 
-function serializeMessages(messages: Message[]): StoredMessage[] {
+function serializeMessages(messages: Message[]): Message[] {
   return messages.map((msg) => ({
     id: msg.id,
     role: msg.role,
@@ -1424,7 +1299,7 @@ function serializeMessages(messages: Message[]): StoredMessage[] {
   }));
 }
 
-function deserializeMessages(stored?: StoredMessage[]): Message[] {
+function deserializeMessages(stored?: Message[]): Message[] {
   if (!stored) return [];
   return stored.map((msg) => ({
     id: msg.id,
@@ -1555,4 +1430,13 @@ function createId(): string {
     return crypto.randomUUID();
   }
   return Math.random().toString(36).slice(2);
+}
+
+function buildNotebookFolderPath(id: string) {
+  const cleanId = id.trim();
+  if (!cleanId) return DEFAULT_NEXTCLOUD_FOLDER;
+  const base = DEFAULT_NEXTCLOUD_FOLDER.endsWith("/")
+    ? DEFAULT_NEXTCLOUD_FOLDER.slice(0, -1)
+    : DEFAULT_NEXTCLOUD_FOLDER;
+  return `${base}/${cleanId}`;
 }

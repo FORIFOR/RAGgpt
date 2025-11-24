@@ -14,6 +14,7 @@ import {
   saveNotebookMeta,
 } from "@/lib/notebookMeta";
 import { cn } from "@/lib/utils";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
 
 type NotebookSummary = {
   notebook_id: string;
@@ -244,10 +245,10 @@ function NotebookCard({
             ⋯
           </button>
         </div>
-          <div className="space-y-2">
-            <h2 className="line-clamp-2 text-lg font-semibold text-slate-900">
-              {displayTitle}
-            </h2>
+        <div className="space-y-2">
+          <h2 className="line-clamp-2 text-lg font-semibold text-slate-900">
+            {displayTitle}
+          </h2>
           <p className="text-sm text-slate-500" title="登録されている資料の件数">
             {summary.sources} 件のソース
           </p>
@@ -305,7 +306,7 @@ function NotebookCard({
   );
 }
 
-export default function NotebooksPage() {
+function NotebooksPage() {
   const router = useRouter();
   const [identity, setIdentity] = useState<{ tenant: string; user: string }>({
     tenant: DEFAULT_TENANT,
@@ -575,30 +576,30 @@ export default function NotebooksPage() {
 
           {isLoading || !ready
             ? Array.from({ length: 5 }).map((_, index) => (
-                <div
-                  key={`skeleton-${index}`}
-                  className="aspect-[4/3] animate-pulse rounded-3xl border border-slate-200 bg-slate-100"
-                />
-              ))
+              <div
+                key={`skeleton-${index}`}
+                className="aspect-[4/3] animate-pulse rounded-3xl border border-slate-200 bg-slate-100"
+              />
+            ))
             : notebooks.map((summary) => (
-                <NotebookCard
-                  key={summary.notebook_id}
-                  summary={summary}
-                  isActive={lastNotebookId === summary.notebook_id}
-                  onOpen={openNotebook}
-                  onCopy={copyNotebookId}
-                  onRefresh={() => {
-                    void mutate();
-                  }}
-                  onDelete={handleDeleteNotebook}
-                  isDeleting={deletingId === summary.notebook_id}
-                  displayTitle={
-                    localTitles[summary.notebook_id]?.trim() ||
-                    summary.title?.trim() ||
-                    summary.notebook_id
-                  }
-                />
-              ))}
+              <NotebookCard
+                key={summary.notebook_id}
+                summary={summary}
+                isActive={lastNotebookId === summary.notebook_id}
+                onOpen={openNotebook}
+                onCopy={copyNotebookId}
+                onRefresh={() => {
+                  void mutate();
+                }}
+                onDelete={handleDeleteNotebook}
+                isDeleting={deletingId === summary.notebook_id}
+                displayTitle={
+                  localTitles[summary.notebook_id]?.trim() ||
+                  summary.title?.trim() ||
+                  summary.notebook_id
+                }
+              />
+            ))}
         </div>
 
         {!isLoading && ready && notebooks.length === 0 && !error ? (
@@ -614,5 +615,13 @@ export default function NotebooksPage() {
         ) : null}
       </section>
     </main>
+  );
+}
+
+export default function ProtectedNotebooksPage() {
+  return (
+    <ProtectedRoute>
+      <NotebooksPage />
+    </ProtectedRoute>
   );
 }

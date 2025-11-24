@@ -53,6 +53,15 @@ const dbImage = process.env.RAG_DB_IMAGE ?? 'ankane/pgvector:latest'
 const dbUser = process.env.RAG_DB_USER ?? 'rag'
 const dbPassword = process.env.RAG_DB_PASSWORD ?? 'ragpass'
 const dbName = process.env.RAG_DB_NAME ?? 'ragdb'
+const dockerDesktopAppPath = '/Applications/Docker.app'
+const dockerDesktopStartCommand =
+  process.platform === 'darwin' && fs.existsSync(dockerDesktopAppPath)
+    ? 'open -ga Docker'
+    : null
+const dockerStartCommand = process.env.RAG_AUTODEV_DOCKER_START_CMD
+const autoStartColima = process.env.RAG_AUTODEV_AUTO_COLIMA !== '0'
+const dockerDaemonWaitAttempts = Number(process.env.RAG_AUTODEV_DOCKER_WAIT_ATTEMPTS ?? '30')
+const dockerDaemonWaitDelayMs = Number(process.env.RAG_AUTODEV_DOCKER_WAIT_DELAY_MS ?? '2000')
 
 const sharedChildren = []
 let shuttingDown = false
@@ -98,6 +107,111 @@ const isPortOpen = (host, port, timeoutMs = 1000) =>
     socket.once('connect', () => finish(true))
   })
 
+const commandExists = async (cmd) => {
+  if (!cmd) return false
+  const checker = process.platform === 'win32' ? 'where' : 'which'
+  const args = process.platform === 'win32' ? [cmd] : [cmd]
+  try {
+    await execFileAsync(checker, args)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const runShellCommand = async (command) => {
+  const shell = process.platform === 'win32' ? 'cmd' : process.env.SHELL || 'bash'
+  const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-lc', command]
+  return execFileAsync(shell, shellArgs, { cwd: projectRoot })
+}
+
+const isDockerDaemonUnavailable = (err) => {
+  const combined = `${err?.stderr ?? ''} ${err?.stdout ?? ''} ${err?.message ?? ''}`.toLowerCase()
+  return combined.includes('cannot connect to the docker daemon') || combined.includes('is the docker daemon running')
+}
+
+const resolveDockerStartStrategies = async () => {
+  const strategies = []
+
+  if (dockerStartCommand) {
+    strategies.push({
+      label: dockerStartCommand,
+      run: () => runShellCommand(dockerStartCommand),
+    })
+    return strategies
+  }
+
+  if (autoStartColima && (await commandExists('colima'))) {
+    strategies.push({
+      label: 'colima start',
+      run: () => execFileAsync('colima', ['start']),
+    })
+  }
+
+  if (dockerDesktopStartCommand) {
+    strategies.push({
+      label: dockerDesktopStartCommand,
+      run: () => runShellCommand(dockerDesktopStartCommand),
+    })
+  }
+
+  return strategies
+}
+
+const ensureDockerDaemon = async () => {
+  const dockerReady = async () => {
+    try {
+      await execDocker(['info'])
+      return true
+    } catch (err) {
+      if (isDockerDaemonUnavailable(err)) {
+        return false
+      }
+      throw err
+    }
+  }
+
+  if (await dockerReady()) {
+    return
+  }
+
+  const strategies = await resolveDockerStartStrategies()
+  if (!strategies.length) {
+    console.error('❌ [dev:autodev] Docker daemon is not running. Start Docker Desktop/Colima manually or set RAG_AUTODEV_DOCKER_START_CMD.')
+    console.error('    → To disable auto-start entirely, export RAG_DB_AUTO_START=0')
+    process.exit(1)
+  }
+
+  let startLabel = null
+  for (const strategy of strategies) {
+    try {
+      console.log(`🐋 [dev:autodev] Attempting to start Docker daemon via: ${strategy.label}`)
+      await strategy.run()
+      startLabel = strategy.label
+      break
+    } catch (err) {
+      console.warn(`⚠️  [dev:autodev] Failed to start Docker via ${strategy.label}: ${err?.message ?? err}`)
+    }
+  }
+
+  if (!startLabel) {
+    console.error('❌ [dev:autodev] Unable to automatically start Docker. Start it manually or provide RAG_AUTODEV_DOCKER_START_CMD.')
+    console.error('    → If auto-start is not desired, set RAG_DB_AUTO_START=0')
+    process.exit(1)
+  }
+
+  for (let attempt = 1; attempt <= dockerDaemonWaitAttempts; attempt++) {
+    if (await dockerReady()) {
+      console.log('✅ [dev:autodev] Docker daemon is ready')
+      return
+    }
+    await wait(dockerDaemonWaitDelayMs)
+  }
+
+  console.error(`❌ [dev:autodev] Docker daemon did not become ready after running ${startLabel}.`)
+  process.exit(1)
+}
+
 const execDocker = async (args) => {
   try {
     return await execFileAsync('docker', args, { cwd: projectRoot })
@@ -114,6 +228,8 @@ const ensureDocker = async () => {
     console.error('❌ [dev:autodev] Docker is required to manage pgvector:', err.message)
     process.exit(1)
   }
+
+  await ensureDockerDaemon()
 }
 
 const ensureDb = async () => {

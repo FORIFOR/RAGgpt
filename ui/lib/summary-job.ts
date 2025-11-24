@@ -1,3 +1,5 @@
+import type { Scope } from "./scope";
+
 export type SummaryJobPhase =
   | "queue"
   | "retrieval"
@@ -45,4 +47,5 @@ export type SummaryJobSnapshot = {
   partialText?: string;
   hint?: string;
   error?: string;
+  scope?: Scope;
 };

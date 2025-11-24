@@ -5,7 +5,6 @@ const nextConfig = {
   // Note: custom API routes under app/api handle proxying; global rewrites are disabled to avoid conflicts
   async redirects() {
     return [
-      { source: '/', destination: '/home', permanent: true },
       { source: '/notebook/new', destination: '/home', permanent: true },
       { source: '/notebook/:id', destination: '/n/:id', permanent: true },
     ];

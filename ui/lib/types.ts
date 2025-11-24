@@ -6,6 +6,9 @@ export type Citation = {
   location: string;
   uri?: string;
   preview?: string;
+  anchor_phrase?: string | null;
+  anchor_char_start?: number | null;
+  anchor_char_end?: number | null;
 };
 
 export type Message = {
@@ -43,4 +46,3 @@ export type SearchCandidate = {
 export type ChatSSEToken = { type: 'token'; text: string };
 export type ChatSSEDone = { type: 'done'; citations: Citation[] };
 export type ChatSSEEvent = ChatSSEToken | ChatSSEDone | { type: 'message' };
-

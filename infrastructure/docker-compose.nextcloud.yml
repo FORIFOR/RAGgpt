@@ -1,0 +1,98 @@
+version: "3.9"
+
+services:
+  rag-backend:
+    container_name: rag-backend
+    build:
+      context: ${RAG_BACKEND_CONTEXT:-../mcp-rag-server}
+      dockerfile: ${RAG_BACKEND_DOCKERFILE:-Dockerfile}
+    env_file:
+      - ../.env.runtime
+    environment:
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://ollama:11434/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama}
+      OPENAI_MODEL: ${OPENAI_MODEL:-qwen2.5:7b-instruct-q4_K_M}
+      MEILISEARCH_URL: ${MEILISEARCH_URL:-http://meilisearch:7700}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      RERANKER_URL: ${RERANKER_URL:-}
+    depends_on:
+      qdrant:
+        condition: service_started
+      meilisearch:
+        condition: service_started
+    networks:
+      - ragstack
+      - nextcloud-aio
+    restart: unless-stopped
+
+  rag-integrator:
+    container_name: rag-integrator
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    env_file:
+      - ../.env.runtime
+    environment:
+      RAG_INGEST_BASE_URL: ${RAG_INGEST_BASE_URL:-http://rag-backend:8000}
+      NEXTCLOUD_WEBDAV_BASE_URL: ${NEXTCLOUD_WEBDAV_BASE_URL}
+      NEXTCLOUD_USERNAME: ${NEXTCLOUD_USERNAME}
+      NEXTCLOUD_APP_PASSWORD: ${NEXTCLOUD_APP_PASSWORD}
+    volumes:
+      - ../data/nextcloud:/app/data/nextcloud
+    ports:
+      - "8000:8000"
+    networks:
+      - ragstack
+      - nextcloud-aio
+    restart: unless-stopped
+
+  rag-ui:
+    container_name: rag-ui
+    build:
+      context: ..
+      dockerfile: ui/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://rag-backend:8000}
+        NEXT_PUBLIC_API_KEY: ${NEXT_PUBLIC_API_KEY:-}
+    env_file:
+      - ../.env.runtime
+    ports:
+      - "3000:3000"
+    depends_on:
+      - rag-backend
+    networks:
+      - ragstack
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:1.8.2
+    container_name: rag-qdrant
+    volumes:
+      - ../data/qdrant:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    networks:
+      - ragstack
+    restart: unless-stopped
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.11
+    container_name: rag-meilisearch
+    environment:
+      MEILI_MASTER_KEY: ${MEILISEARCH_MASTER_KEY:-dev-meili-key}
+    volumes:
+      - ../data/meili:/meili_data
+    ports:
+      - "7700:7700"
+    networks:
+      - ragstack
+    restart: unless-stopped
+
+networks:
+  ragstack:
+    driver: bridge
+  nextcloud-aio:
+    external: true
